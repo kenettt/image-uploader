@@ -180,7 +180,7 @@ async function updateDatabase(bunnyUrl, folderName, is10x15, filename, isPurchas
 async function queryWithRetry(sql, params, retries = 5) {
   for (let i = 1; i <= retries; i++) {
     try {
-      return await queryWithRetry(sql, params);
+      return await pool.query(sql, params);
     } catch (error) {
       console.error(`DB retry ${i}/${retries}:`, error.message);
 
