@@ -22,17 +22,43 @@ const pool = new Pool({
   host: process.env.PGHOST,
   database: process.env.PGDATABASE,
   password: process.env.PGPASSWORD,
-  port: process.env.PGPORT, 
+  port: Number(process.env.PGPORT),
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
   ssl: {
     rejectUnauthorized: false,
   },
 });
 
+const queue = [];
+let activeCount = 0;
+const maxConcurrent = 2;
+
+function addToQueue(task) {
+  queue.push(task);
+  runQueue();
+}
+
+async function runQueue() {
+  if (activeCount >= maxConcurrent || queue.length === 0) return;
+
+  activeCount++;
+  const task = queue.shift();
+
+  try {
+    await task();
+  } finally {
+    activeCount--;
+    runQueue();
+  }
+}
+
 const registeredFolders = new Set();
 
 
 async function ensureFolderInDatabase(folderName, grandParentFolder) {
-    if (registeredFolders.has(folderName)) {
+  if (registeredFolders.has(folderName)) {
     // Kaust juba registreerimisel või registreeritud
     return;
   }
@@ -40,7 +66,7 @@ async function ensureFolderInDatabase(folderName, grandParentFolder) {
   registeredFolders.add(folderName);
   try {
     // Kontrolli kas juba olemas
-    const result = await pool.query(
+    const result = await queryWithRetry(
       'SELECT 1 FROM uniquefolders WHERE unique_folder = $1',
       [folderName]
     );
@@ -50,7 +76,7 @@ async function ensureFolderInDatabase(folderName, grandParentFolder) {
     }
 
     // VÕTA event_id vastavalt grandParentFolderile (event_name)
-    const eventRes = await pool.query(
+    const eventRes = await queryWithRetry(
       'SELECT event_id FROM events WHERE event_name = $1',
       [grandParentFolder]
     );
@@ -67,10 +93,10 @@ async function ensureFolderInDatabase(folderName, grandParentFolder) {
     const qrCode = await QRCode.toDataURL(qrData);
 
     // Loo kasutaja
-    await pool.query('INSERT INTO users (id) VALUES ($1)', [userId]);
+    await queryWithRetry('INSERT INTO users (id) VALUES ($1)', [userId]);
 
     // Loo folderi kirje
-    await pool.query(
+    await queryWithRetry(
       'INSERT INTO uniquefolders (unique_folder, event_id, user_id, qr_code) VALUES ($1, $2, $3, $4)',
       [folderName, eventId, userId, qrCode]
     );
@@ -105,7 +131,7 @@ async function fileExistsInBunny(destinationPath) {
 
 async function fileExistsInDatabase(bunnyUrl) {
   try {
-    const result = await pool.query('SELECT 1 FROM images WHERE image_url = $1', [bunnyUrl]);
+    const result = await queryWithRetry('SELECT 1 FROM images WHERE image_url = $1', [bunnyUrl]);
     return result.rows.length > 0;
   } catch (error) {
     console.error('Database check error:', error);
@@ -140,13 +166,30 @@ async function uploadToBunny(filePath, destinationPath) {
 
 async function updateDatabase(bunnyUrl, folderName, is10x15, filename, isPurchased) {
   try {
-    await pool.query(
+    await queryWithRetry(
       'INSERT INTO images (folder_id, image_url, is_purchased, is10x15, image_name) VALUES ($1, $2, $3, $4, $5)',
       [folderName, bunnyUrl, isPurchased, is10x15, filename]
     );
   } catch (error) {
     console.error('Database update error:', error);
     logError(`Database update failed for: ${bunnyUrl} - ${error.message}`);
+    throw error;
+  }
+}
+
+async function queryWithRetry(sql, params, retries = 5) {
+  for (let i = 1; i <= retries; i++) {
+    try {
+      return await queryWithRetry(sql, params);
+    } catch (error) {
+      console.error(`DB retry ${i}/${retries}:`, error.message);
+
+      if (i === retries) {
+        throw error;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, i * 1000));
+    }
   }
 }
 
@@ -205,7 +248,7 @@ function checkFileStability(filePath, filename, isPurchased, grandParentFolder) 
       const stats = fs.statSync(filePath);
       if (stats.size === previousSize) {
         clearInterval(interval);
-        processFile(filePath, filename, isPurchased, grandParentFolder);
+        addToQueue(() => processFile(filePath, filename, isPurchased, grandParentFolder));
       } else {
         previousSize = stats.size;
         checkCount++;
@@ -213,14 +256,14 @@ function checkFileStability(filePath, filename, isPurchased, grandParentFolder) 
           clearInterval(interval);
           console.warn(`File stability timeout: ${filename}`);
           logError(`File stability timeout: ${filename}`);
-          processFile(filePath, filename, isPurchased, grandParentFolder);
+          addToQueue(() => processFile(filePath, filename, isPurchased, grandParentFolder));
         }
       }
     } catch (error) {
       clearInterval(interval);
       console.error(`Error checking file stability: ${error}`);
       logError(`Error checking file stability: ${error.message}`);
-      processFile(filePath, filename, isPurchased, grandParentFolder);
+      addToQueue(() => processFile(filePath, filename, isPurchased, grandParentFolder));
     }
   }, stabilityCheckInterval);
 }
@@ -231,6 +274,10 @@ function watchChildFolders(localFolderPath) {
     persistent: true,
     ignoreInitial: true,
     usePolling: true,
+    awaitWriteFinish: {
+      stabilityThreshold: 3000,
+      pollInterval: 1000
+    }
   });
 
 
