@@ -1,0 +1,23 @@
+{
+  "name": "image-uploader",
+  "version": "1.0.0",
+  "description": "",
+  "main": "script.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "fs": "^0.0.1-security",
+    "node-fetch": "^3.3.2",
+    "path": "^0.12.7",
+    "pg": "^8.14.1",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.33.5",
+    "uuid": "^11.1.0"
+  }
+}
